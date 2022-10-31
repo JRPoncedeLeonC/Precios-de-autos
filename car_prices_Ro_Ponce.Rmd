@@ -1,0 +1,521 @@
+---
+title: "Precios de coches"
+author: "Rodrigo Ponce de Leon"
+date: '2022-10-30'
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = T)
+```
+
+
+## Contenido:
+1. Introducción.
+
+2. Llamado a librerías.
+
+3. Importación de base de datos.
+
+4. Análisis del dataset.
+
+5. Creación de dataset de entrenamiento.
+
+6. Análisis de correlación entre variables y selección de predictores.
+
+7. Preparación de los datos.
+
+8. Entrenamiento de modelos y evaluación.
+
+9. Conclusión.
+
+## 1. Introducción.
+
+Una empresa automovilística china aspira a entrar en el mercado estadounidense. Desea establecer allí una unidad de fabricación y producir automóviles localmente para competir con sus contrapartes estadounidenses y europeas. Contrataron una empresa de consultoría de automóviles para identificar los principales factores de los que depende el precio de los automóviles, específicamente, en el mercado estadounidense, ya que pueden ser muy diferentes del mercado chino. Esencialmente, la empresa quiere saber:
+
+* Qué variables son significativas para predecir el precio de un automóvil.
+
+* Qué tan bien describen esas variables el precio de un automóvil.
+
+
+## 2. Llamado a librerías.
+
+
+```{r}
+library(tidyverse) #manejo, limpieza y visualización de datos
+library(caret) #Machine learning
+```
+
+
+## 3. Importación de base de datos.
+
+
+```{r}
+df <- read.csv("precios_autos.csv")
+```
+
+
+## 4. Análisis del dataset.
+
+
+```{r}
+head(df) #primeras cinco observaciones
+```
+```{r}
+str(df)#variables e info
+```
+```{r}
+summary(df) #resumen estadístico
+```
+
+
+Se observa que el dataset cuenta con 205 observaciones y 21 variables, de las cuales 8 son categóricas y 13 son numéricas. 
+
+
+```{r}
+sum(duplicated(df)) #número de observaciones duplicadas
+```
+
+
+df no cuenta con observaciones duplicadas.
+
+
+```{r}
+nums <- unlist(lapply(df, is.numeric), use.names = F)  
+df[,nums] %>% gather(key = "variable", value = "value") %>%
+  ggplot(aes(value, fill = variable)) + geom_histogram() +
+  theme(axis.text.x = element_text(angle = 90)) +
+  facet_wrap(~ variable, scales = "free") #histograma para variables numéricas
+```
+
+
+Se observa que todas las variables son numéricas, mientras que symboling es una variable categórica no ordinal, dado que se generó un gráfico de barras en lugar de un histograma.
+
+
+```{r}
+cat <- unlist(lapply(df, is.character), use.names = F)  
+df[,cat] %>% select(-CarName) %>% 
+  gather(key = "variable", value = "value") %>%
+  ggplot(aes(value, fill = variable)) + geom_bar() +
+  theme(axis.text.x = element_text(angle = 90)) +
+  facet_wrap(~ variable, scales = "free") #histograma para variables no numéricas
+```
+
+
+A continuación se describen los resultados del gráfico anterior:
+
+* El cuerpo de auto más común, es el tipo sedan.
+
+* El número de cilíndros más común es 4.
+
+* La tracción más común es la delantera.
+
+* El más común que el motor se encuentre hacia el frente.
+
+* Los motores ohc son los más comunes. 
+
+* La mayoría de los autos utiliza gasolina regular.
+
+La variable CarName con 147 categorías distintas, por lo que no es conveniente visualizarla. Por otro lado, se puede mostrar en una tabla las categorías que cuentan con el mayor número de observaciones:
+
+
+```{r}
+df %>% group_by(CarName) %>% summarize(n = n()) %>% arrange(desc(n))
+```
+
+
+Se puede observar que los modelos peugeot 504, toyota corolla, toyota corona, cuentan con la mayor cantidad de observaciones.
+
+
+```{r}
+df[,nums] %>% gather(key = "variable", value = "value") %>%
+  ggplot(aes(value, fill = variable)) + geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 90)) +
+  facet_wrap(~ variable, scales = "free") #boxplots para variables numéricas
+```
+
+
+Se observa que carheight, curbweight y symboling son las únicas variables que no cuentan con valores atípicos. 
+
+```{r}
+df %>% gather(key = "variable", value = "value") %>%
+  group_by(variable) %>% summarise(na_num = sum(is.na(value))) #número de valores nulos por variable
+```
+```{r}
+sum(is.na(df)) #número total de valores nulos en el dataset
+```
+
+
+Se observa que df no cuenta con valores nulos, facilitando el proceso de preparación para el entrenamiento de algoritmos inteligentes. 
+
+## 5. Creación de dataset de entrenamiento.
+
+En este paso se realiza una separación estratificada, utilizando la función createDataPartition. Dada la baja cantidad de observaciones (205), se toma el 30% de las observaciones y se asignan al dataset de prueba.
+
+
+```{r}
+y <- df$price #variable a predecir
+set.seed(42, sample.kind = "default") #se ajusta la semilla para reproducibilidad
+test_index <- createDataPartition(y, times=1, p=0.3, list=F) #índices de observaciones para test_set
+train_data <- df[-test_index,] #datos de entrenamiento
+test_data <- df[test_index,] #datos de prueba
+```
+
+
+## 6. Análisis de correlación entre variables y selección de predictores.
+
+Utilizando train_set, se determina la correlación entre las variables numéricas.
+
+
+```{r}
+library(corrplot)
+cor_mat <- cor(train_data[,nums], use = "complete.obs")
+corrplot(cor_mat, type = "upper",
+         tl.col = "black", tl.srt = 45, method="color")
+```
+
+
+Se puede observar que muchos de los predictores se correlacionan entre sí, lo cual no es bueno dados los problemas de colinealidad. Por lo tanto, se realiza una PCA para determinar los coeficientes de las combinaciones lineales y así elegir las variables más representativas. La función prcomp realiza esta tarea y, además, escala los datos previo al ajuste del modelo no supervisado.
+
+
+```{r}
+pca <- prcomp(train_data[,nums], scale = TRUE,
+                center = TRUE, retx = T) #pca
+```
+```{r}
+pca$rotation #matriz a analizar
+```
+```{r}
+#función para determinar valor máximo (en valor absoluto) por componente principal 
+get_max_pca <- function(m){
+  df_m <- data.frame(m)
+  df_m[, "index"] <- df_m %>% row.names
+  res <- data.frame(matrix(nrow=0, ncol=0))
+  c <- 1
+  for (i in df_m %>% select(-index) %>% names()){
+    res[c, "val"] <- df_m[abs(df_m[i])==max(abs(df_m[i])), i]
+    res[c, "PC"] <- i
+    res[c, "index"] <- df_m[abs(df_m[i])==max(abs(df_m[i])), "index"]
+    c <- c + 1
+  }
+  return(res)
+}
+```
+```{r}
+#resultados
+re <- get_max_pca(pca$rotation)
+```
+```{r}
+re #dataset con resultados
+```
+```{r}
+nums_new <- re$index %>% unique #variables con coeficiente más alto
+nums_new <- c(nums_new[nums_new != "price"], nums_new[nums_new == "price"])
+nums_new
+```
+
+
+Una vez teniendo los resultados (nums_new), se visualiza la matriz de correlación con las 9 variables seleccionadas, para determinar si hay correlación entre predictores nuevamente y elegir únicamente a las variables que tengan una correlación más fuerte con price y que no se correlacionen entre ellas mismas.
+
+
+```{r}
+cor_mat <- cor(train_data[,nums_new], 
+               use = "complete.obs")
+corrplot(cor_mat, type = "upper",
+         tl.col = "black", tl.srt = 45, method="number")
+```
+
+
+Se puede observar que las variables curbweight, carwidth, carlength y citympg se correlacionan entre sí. Por lo tanto, tomando en consideración que curbweight cuenta con la mayor correlación con price, se descartan carwidth, carlength y citympg. 
+
+Por otro lado, se mantiene la variable carheight y se descarta la variable symboling debido a que la primera es numérica.
+
+
+```{r}
+cor_mat <- cor(train_data[,nums_new[!nums_new %in% c("carwidth", 
+                                                    "carlength", 
+                                                    "citympg", "symboling")]],
+               use = "complete.obs")
+corrplot(cor_mat, type = "upper",
+         tl.col = "black", tl.srt = 45, method="number")
+```
+
+
+Como se puede observar, la nueva matriz de correlación ya no muestra correlación entre los predictores. Sin embargo, ahora se necesita elegir algún otro predictor categórico que ayude a realizar el análisis predictivo.
+
+Observando los gráficos de barras, "enginelocation", "fueltype" pueden fungir como variables categóricas. 
+
+## 7. Preparación de los datos.
+
+Para que los datos numéricos puedan ser comparables, es necesario que se encuentren en la misma escala, pero sin cambiar su distribución. Ergo, se necesita un método de escalamiento, que en este caso es la estandarización. 
+
+Por otro lado, las variables categóricas se transforman a dummy dado que ambas cuentan con 2 categorías.
+
+
+```{r}
+#función para escalamiento de datos
+ScaleData <- function(df){ 
+  df_pred <- df %>% select(curbweight, carheight, stroke, peakrpm) %>% scale() #dataframe con predictores estandarizados 
+  return(data.frame(df_pred))
+}
+```
+```{r}
+#función para variable categórica con 2 categorías
+DummyData <- function(df){
+  df1 <- df
+  #df1["fueltype"] <- factor(df1$fueltype %>% factor %>% as.numeric - 1)
+  df1["fueltype"] <- df1$fueltype %>% factor %>% as.numeric - 1
+  df1["enginelocation"] <- df1$enginelocation %>% factor %>% as.numeric - 1
+  #return(df1["fueltype"])
+  return(df1[c("enginelocation", "fueltype")])
+}
+```
+```{r}
+#función para tener dataset preparado
+JoinData <- function(df){
+  df_num <- ScaleData(df)
+  df_cat1 <- DummyData(df)
+  #return(cbind(df_num, df_cat, df_cat1,"price"=df["price"]))
+  return(cbind(df_num, df_cat1, "price"=df["price"]))
+}
+```
+```{r}
+#Datos preparados
+train_data_prep <- JoinData(train_data)
+test_data_prep <- JoinData(test_data)
+```
+
+
+Teniendo los datos preparados, se debe revisar que no hay correlación entre los predictores. Se observa que los predictores no están correlacionados:
+
+
+```{r}
+cor_mat <- cor(train_data_prep, 
+               use = "complete.obs")
+corrplot(cor_mat, type = "upper",
+         tl.col = "black", tl.srt = 45, method="number")
+```
+
+
+
+## 8. Entrenamiento de modelos y evaluación.
+
+Teniendo los datos preparados, se entrenan 2 diferentes algoritmos (randomforest regressor y xgboost regressor), realizando validación cruzada con $k=5$ y tuneo de hiperparámetros, y un modelo de regresión multilineal. 
+
+Se evalúa para randomforest regressor y xgboost regressor utilizando RMSE, donde entre más pequeño sea el resultado mejor el modelo.
+
+
+$$
+[\frac{(x_{i}-\bar{x})^2}{n}]^{1/2}
+$$
+
+
+Por otro lado, para el modelo lineal se determina el coeficiente de determinación y se realiza un análisis de residuos para determinar si éste es adecuado o no.
+
+* Random Forest:
+
+
+```{r}
+train_control <- trainControl(method = "cv", number = 5) #para realizar validación cruzada en los algoritmos
+```
+
+```{r}
+#random forest
+train_rf <- train(price ~. , method = "ranger",
+                  data = train_data_prep,
+                  tuneGrid = expand.grid(
+                    mtry = seq(1:6), 
+                    splitrule = "variance", #dado que es un problema de regresión
+                    min.node.size = 5 #para problemas de regresión
+                  ),
+                  trControl = train_control) #cross-validation
+
+```
+```{r}
+ggplot(train_rf, highlight = T)#resultados
+```
+```{r}
+pred_rf <- predict(train_rf, test_data_prep) #predicciones
+```
+```{r}
+RMSE(pred_rf, test_data_prep$price) #métrica
+```
+```{r}
+R2(pred_rf, test_data_prep$price) #métrica R^2
+```
+```{r}
+#visualización de resultados
+data.frame(i = seq(1:nrow(test_data_prep)),pred_rf, 
+      price = test_data_prep$price) %>% gather(key = "k", 
+                                               value = "v",
+                                               -i) %>% 
+  ggplot(aes(i, v, col = k)) +
+  geom_point() +
+  geom_line()
+```
+
+Se observa que el modelo con $mtry = 4$ se obtienen los mejores resultados con un $rmse=3316.399$ y $r^2=0.8299176$. Por otro lado, se observa cómo las predicciones tienen una tendencia aproximada a la de los valores verdaderos.
+
+
+*Xgboost:
+
+
+```{r}
+library(xgboost)
+train_xgb <- train(price ~., method = "xgbDART",
+                  data = train_data_prep,
+                  trControl = train_control,
+                  tuneGrid = expand.grid(
+                    nrounds = c(11),
+                    max_depth = c(6, 7, 8),#
+                    eta = c(0, 0.01, 0.1, 0.2), #
+                    gamma = c(0, 0.001, 0.01), #
+                    subsample = 0.5,
+                    colsample_bytree = c(0.5, 0.8, 1),# 
+                    rate_drop = c(0, 0.4,0.5), #
+                    skip_drop = c(0, 0.4,0.5), #
+                    min_child_weight = c(0,1,2)))
+```
+```{r}
+train_xgb$bestTune #mejor modelo
+```
+
+```{r}
+pred_xgb <- predict(train_xgb, test_data_prep) #predicciones
+```
+```{r}
+RMSE(pred_xgb, test_data_prep$price) #métrica
+```
+```{r}
+R2(pred_xgb, test_data_prep$price) #métrica
+```
+
+```{r}
+#visualización de resultados
+data.frame(i = seq(1:nrow(test_data_prep)),pred_xgb, 
+      price = test_data_prep$price) %>% gather(key = "k", 
+                                               value = "v",
+                                               -i) %>% 
+  ggplot(aes(i, v, col = k)) +
+  geom_point() +
+  geom_line()
+```
+
+Se observa que el modelo tiene un $rmse=4379.223$ y $r^2=0.7476562$. Por otro lado, las predicciones no tienen una buena aproximación a los valores reales.
+
+* Regresión multilineal:
+
+Se propone el siguiente modelo:
+
+
+$$
+price = \beta_0 + \beta_1*curbweight + \beta_2*carheight + \beta_3*stroke +
+\beta_4*peakrpm + \beta_5*enginelocation + \beta_6*fueltype
+$$
+
+```{r}
+train_lm <- lm(price ~., data = train_data_prep) #ajuste
+```
+
+
+**Análisis de coeficientes y coeficiente de determinación**:
+
+$H_0: \beta_0=\beta_1=\beta_2=\beta_3=\beta_4=\beta_5=\beta_6=0$
+
+$$
+H_1: \beta_0\neq 0, \beta_1\neq0, \beta_2\neq0, \beta_3\neq0, 
+\beta_4\neq0, \beta_5\neq0, \beta_6\neq0
+$$
+
+
+```{r}
+train_lm %>% summary() #resumen
+```
+
+
+Se rechaza la hipótesis nula.
+
+
+**Análisis de residuos**:
+
+$H_0:$ los errores provienen de una población normal (con media 0)
+$H_1:$ los errores no provienen de una población normal
+
+
+```{r}
+shapiro.test(train_lm$residuals) #test de shapiro
+```
+
+
+Se rechaza $H_0$.
+
+
+```{r}
+qqnorm(train_lm$residuals) #q-q plot
+qqline(train_lm$residuals)
+```
+```{r}
+#histograma de frecuencia con gráfico de densidad de distribución normal (azul) y gráfico de densidad de la distribución de los errores (rojo)
+hist(train_lm$residuals,freq=FALSE, ylim = c(0,2e-04))
+lines(density(train_lm$residual),col="red")
+curve(dnorm(x,mean(train_lm$residuals), 
+            sd(train_lm$residuals)), 
+            from=-15000, to=20000, add=TRUE, col="blue",lwd=2)
+```
+
+
+**Prueba de hipótesis para la media de los residuos**:
+
+$H_0:$ los errores tienen media 0
+$H_1:$ los errores no tienen media 0
+
+
+```{r}
+t.test(train_lm$residuals) #prueba de t-student para medias
+```
+
+
+Dado el p-value = 1, se acepta la hipótesis nula de que la media sí es 0.
+
+**Análisis de simetría y homocedasticidad**
+
+En el gráfico se observa simetría y heterocedasticidad dado que los residuos se empiezan a dispersar.
+
+
+```{r}
+plot(train_lm$fitted.values,train_lm$residuals) 
+abline(h=0, col=c("blue"))
+```
+
+
+**Análisis del modelo**
+
+Analizando los resultados, el modelo lineal presentó un coeficiente de determinación ajustado adecuado $r^2=0.7836 $. No obstante, al realizar el análisis de residuos se tiene que éstos no se distribuyen de manera normal y hay cierta heterocedasticidad, aunque se tenga que la media tienda a 0. Por lo tanto, el modelo no es adecuado para realizar predicciones.
+
+
+## 8. Conclusión.
+
+Al realizar todo el proceso de selección de variable y de procesamiento de éstas, para entrenar modelos de machine learning, se tiene que el modelo Random Forest Regressor (con el hiperparámetro $mtry = 4$) presenta los mejores resultados, teniendo un $rmse=3316.399$ y $r^2=0.8299176$. Por otro lado, XGboost Regressor no supera las métricas del modelo anterior ($rmse=4379.223$ y $r^2=0.7476562$) y el modelo de regresión multilineal se demostró que no cumple con los requerimiento para realizar predicciones dado que los residuos no siguen una distribución normal (sin importar que $r^2_{a}=0.7836 $). 
+
+Se recomienda realizar el proceso nuevamente, seleccionando otras combinaciones de variables (asegurando que no haya correlación entre los predictores) para determinar si hay mejores resultados en la modelación.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
